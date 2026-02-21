@@ -1,0 +1,5 @@
+.build/
+.swiftpm/
+VoiceToText.app/
+*.log
+.DS_Store
