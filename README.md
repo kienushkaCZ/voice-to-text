@@ -25,7 +25,16 @@ xcode-select --install
 
 **2. Get a Deepgram API key:**
 
-Go to [console.deepgram.com](https://console.deepgram.com/), sign up (free tier gives you $200 in credits), create an API key.
+You need a free API key from Deepgram (speech recognition service).
+
+1. Go to [console.deepgram.com](https://console.deepgram.com/) and sign up (Google/GitHub or email)
+2. After sign-up you'll land on the Dashboard. Deepgram gives **$200 in free credits** — this is enough for ~500 hours of transcription
+3. In the left sidebar, click **API Keys**
+4. Click **Create a New API Key**
+5. Give it a name (e.g. "voice-to-text"), set **Role** to "Member", **Expiration** to "Never"
+6. Click **Create Key** and **copy the key** — you'll need it in the next step
+
+> **Important:** The key is shown only once. If you lose it, just create a new one.
 
 **3. Clone and install:**
 
