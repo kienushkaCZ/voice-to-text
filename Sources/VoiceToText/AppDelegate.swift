@@ -203,11 +203,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
+            recorder.onLevel = { [weak self] level in
+                self?.hud.updateAudioLevel(level)
+            }
             try recorder.start()
             state = .recording
             updateIcon(for: .recording)
             NSSound(named: "Tink")?.play()
-            hud.show("Recording...", icon: "🔴", duration: 60)
+            hud.showRecording("Recording...", icon: "🔴")
             Log.info("Recording STARTED")
         } catch {
             Log.info("Failed to start recording: \(error)")
@@ -216,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecordingAndTranscribe() {
+        recorder.onLevel = nil
         let pcmData = recorder.stop()
         state = .processing
         updateIcon(for: .processing)

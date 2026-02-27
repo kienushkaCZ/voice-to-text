@@ -9,6 +9,7 @@ final class HUD {
     private var progressStartTime: TimeInterval = 0
     private var progressEstimatedDuration: TimeInterval = 10
     private var baseMessage: String = ""
+    private var levelView: AudioLevelView?
 
     /// Show a floating HUD near the menu bar with an icon and message.
     func show(_ message: String, icon: String, duration: TimeInterval = 3.0) {
@@ -17,7 +18,7 @@ final class HUD {
             window?.close()
 
             let panel = createPanel()
-            let container = createContent(icon: icon, message: message, showProgress: false)
+            let container = createContent(icon: icon, message: message, mode: .simple)
             panel.contentView = container
             positionAndPresent(panel: panel, container: container)
 
@@ -27,6 +28,26 @@ final class HUD {
                 self?.hide()
             }
         }
+    }
+
+    /// Show a recording HUD with animated audio level bars. Stays visible until replaced.
+    func showRecording(_ message: String, icon: String) {
+        DispatchQueue.main.async { [self] in
+            invalidateTimers()
+            window?.close()
+
+            let panel = createPanel()
+            let container = createContent(icon: icon, message: message, mode: .recording)
+            panel.contentView = container
+            positionAndPresent(panel: panel, container: container)
+
+            self.window = panel
+        }
+    }
+
+    /// Update the audio level meter (call from audio callback on main thread).
+    func updateAudioLevel(_ level: Float) {
+        levelView?.updateLevel(level)
     }
 
     /// Show a floating HUD with a progress bar. Stays visible until replaced or hidden.
@@ -40,7 +61,7 @@ final class HUD {
             self.progressEstimatedDuration = max(estimatedDuration, 2.0)
 
             let panel = createPanel()
-            let container = createContent(icon: icon, message: message, showProgress: true)
+            let container = createContent(icon: icon, message: message, mode: .progress)
             panel.contentView = container
             positionAndPresent(panel: panel, container: container)
 
@@ -64,10 +85,17 @@ final class HUD {
             self?.window = nil
             self?.textField = nil
             self?.progressIndicator = nil
+            self?.levelView = nil
         })
     }
 
     // MARK: - Private
+
+    private enum ContentMode {
+        case simple
+        case recording
+        case progress
+    }
 
     private func invalidateTimers() {
         hideTimer?.invalidate()
@@ -80,8 +108,6 @@ final class HUD {
         let elapsed = ProcessInfo.processInfo.systemUptime - progressStartTime
         let est = progressEstimatedDuration
 
-        // Asymptotic progress: linear to 80% over estimated time,
-        // then slowly approaches 95% — never reaches 100% until result arrives.
         let progress: Double
         if elapsed <= est {
             progress = (elapsed / est) * 80.0
@@ -113,7 +139,7 @@ final class HUD {
         return panel
     }
 
-    private func createContent(icon: String, message: String, showProgress: Bool) -> NSVisualEffectView {
+    private func createContent(icon: String, message: String, mode: ContentMode) -> NSVisualEffectView {
         let container = NSVisualEffectView()
         container.material = .hudWindow
         container.state = .active
@@ -127,7 +153,23 @@ final class HUD {
 
         let rightColumn: NSView
 
-        if showProgress {
+        switch mode {
+        case .recording:
+            let textLabel = NSTextField(labelWithString: message)
+            textLabel.font = .systemFont(ofSize: 14)
+            textLabel.textColor = .labelColor
+            self.textField = textLabel
+
+            let lv = AudioLevelView()
+            self.levelView = lv
+
+            let row = NSStackView(views: [textLabel, lv])
+            row.orientation = .horizontal
+            row.spacing = 10
+            row.alignment = .centerY
+            rightColumn = row
+
+        case .progress:
             let textLabel = NSTextField(labelWithString: message)
             textLabel.font = .systemFont(ofSize: 14)
             textLabel.textColor = .labelColor
@@ -154,7 +196,8 @@ final class HUD {
             ])
 
             rightColumn = vertStack
-        } else {
+
+        case .simple:
             let textLabel = NSTextField(wrappingLabelWithString: message)
             textLabel.font = .systemFont(ofSize: 14)
             textLabel.textColor = .labelColor
@@ -197,6 +240,54 @@ final class HUD {
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
             panel.animator().alphaValue = 1
+        }
+    }
+}
+
+// MARK: - Audio Level Meter View
+
+private class AudioLevelView: NSView {
+    private let barCount = 5
+    private let barWidth: CGFloat = 3
+    private let barSpacing: CGFloat = 2
+    private let maxBarHeight: CGFloat = 16
+    private let minBarHeight: CGFloat = 2
+    private var barLevels: [CGFloat]
+
+    init() {
+        barLevels = Array(repeating: 0, count: barCount)
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        let width = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
+        return NSSize(width: width, height: maxBarHeight)
+    }
+
+    func updateLevel(_ level: Float) {
+        let normalized = CGFloat(min(level * 8, 1.0))
+
+        for i in 0..<barCount {
+            let variation = CGFloat.random(in: 0.5...1.0)
+            let target = normalized * variation
+            // Fast attack, slow decay
+            barLevels[i] = target > barLevels[i] ? target : barLevels[i] * 0.55 + target * 0.45
+        }
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for i in 0..<barCount {
+            let height = minBarHeight + (maxBarHeight - minBarHeight) * barLevels[i]
+            let x = CGFloat(i) * (barWidth + barSpacing)
+            let y = (bounds.height - height) / 2
+
+            let rect = NSRect(x: x, y: y, width: barWidth, height: height)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5)
+            NSColor.systemGreen.withAlphaComponent(0.9).setFill()
+            path.fill()
         }
     }
 }

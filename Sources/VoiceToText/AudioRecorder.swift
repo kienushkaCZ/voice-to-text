@@ -9,6 +9,9 @@ final class AudioRecorder {
 
     var isRecording: Bool { engine.isRunning }
 
+    /// Called on main thread with RMS audio level (0.0 – 1.0) during recording.
+    var onLevel: ((Float) -> Void)?
+
     func start() throws {
         rawData = Data()
 
@@ -20,6 +23,16 @@ final class AudioRecorder {
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: nativeFormat) { [weak self] buffer, _ in
             guard let self, let floatData = buffer.floatChannelData else { return }
             let frameCount = Int(buffer.frameLength)
+
+            // Calculate RMS for level meter
+            let samples = floatData[0]
+            var sum: Float = 0
+            for i in 0..<frameCount { sum += samples[i] * samples[i] }
+            let rms = sqrt(sum / Float(frameCount))
+            if let onLevel = self.onLevel {
+                DispatchQueue.main.async { onLevel(rms) }
+            }
+
             // Copy float samples immediately (buffer gets reused)
             let bytes = Data(bytes: floatData[0], count: frameCount * MemoryLayout<Float>.size)
             self.lock.lock()
