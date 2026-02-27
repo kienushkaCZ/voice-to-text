@@ -25,6 +25,10 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 
 cp "$BINARY" "$MACOS_DIR/$APP_NAME"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+  mkdir -p "$RESOURCES_DIR"
+  cp "$SCRIPT_DIR/whisper_daemon.py" "$RESOURCES_DIR/whisper_daemon.py"
+
 
 cat > "$CONTENTS_DIR/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
