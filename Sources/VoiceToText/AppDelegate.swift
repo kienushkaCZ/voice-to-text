@@ -2,9 +2,17 @@ import Cocoa
 import AVFoundation
 import UserNotifications
 
+// MARK: - History Entry
+
+struct HistoryEntry: Codable {
+    let date: Date
+    let text: String
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - State
+
     private enum State: CustomStringConvertible {
         case idle, recording, processing
         var description: String {
@@ -27,13 +35,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var deepgram: DeepgramClient?
     private var whisper: WhisperClient?
     private var engine: Engine = .whisper
-    private var autoPaste: Bool = false
     private let hud = HUD()
 
     // Key monitoring
-    private var globalMonitor: Any?
-    private var localMonitor: Any?
+    private var globalFlagsMonitor: Any?
+    private var localFlagsMonitor: Any?
+    private var globalKeyDownMonitor: Any?
+    private var localKeyDownMonitor: Any?
     private var lastToggleTime: TimeInterval = 0
+
+    // Left Control key logic
+    private var ctrlPressTime: TimeInterval = 0
+    private var pttDelayTask: DispatchWorkItem?
+    private var isPTTActive: Bool = false
+    private var isHandsFree: Bool = false
+
+    // Transcription history
+    private var history: [HistoryEntry] = []
+    private var historyMenu: NSMenu?
 
     // MARK: - App lifecycle
 
@@ -42,22 +61,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
         loadEngine()
+        loadHistory()
         setupStatusItem()
         checkAccessibility()
         setupKeyMonitors()
-        Log.info("Setup complete, engine=\(engine), ready")
+        Log.info("Setup complete, engine=\(engine), Left Ctrl hold=PTT, Left Ctrl tap=Toggle, ready")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
+        removeKeyMonitors()
         whisper?.shutdown()
     }
 
     // MARK: - Setup
 
     private func loadEngine() {
-        // Read ENGINE from config (default: whisper)
         let configPath = NSString("~/.config/voice-to-text/config").expandingTildeInPath
         if let contents = try? String(contentsOfFile: configPath, encoding: .utf8) {
             for line in contents.components(separatedBy: .newlines) {
@@ -70,33 +88,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         engine = e
                     }
                 }
-                if trimmed.hasPrefix("AUTO_PASTE=") {
-                    let value = String(trimmed.dropFirst("AUTO_PASTE=".count))
-                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
-                        .lowercased()
-                    autoPaste = (value == "true" || value == "1" || value == "yes")
-                }
             }
         }
 
-        Log.info("Engine: \(engine), autoPaste: \(autoPaste)")
+        Log.info("Engine: \(engine)")
 
         switch engine {
         case .whisper:
-            hud.show("Loading Whisper...", icon: "🧠", duration: 30)
+            hud.show("Loading Whisper...", icon: "\u{1F9E0}", duration: 30)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let client = WhisperClient()
                 DispatchQueue.main.async {
                     self?.whisper = client
                     if client != nil {
-                        self?.hud.show("Whisper ready", icon: "✅", duration: 2)
+                        self?.hud.show("Whisper ready", icon: "\u{2705}", duration: 2)
                         Log.info("Whisper client ready")
                     } else {
-                        // Fallback to Deepgram
                         Log.info("Whisper failed, falling back to Deepgram")
                         self?.engine = .deepgram
                         self?.setupDeepgramClient()
-                        self?.hud.show("Whisper unavailable, using Deepgram", icon: "☁️", duration: 3)
+                        self?.hud.show("Whisper unavailable, using Deepgram", icon: "\u{2601}\u{FE0F}", duration: 3)
                     }
                 }
             }
@@ -113,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         deepgram = DeepgramClient(apiKey: key)
         if deepgram == nil {
             Log.info("WARNING: DEEPGRAM_API_KEY not set")
-            hud.show("API key required — click menu bar icon", icon: "⚠️", duration: 5)
+            hud.show("API key required \u{2014} click menu bar icon", icon: "\u{26A0}\u{FE0F}", duration: 5)
         } else {
             Log.info("Deepgram client OK (key: \(key!.prefix(8))...)")
         }
@@ -161,7 +172,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lines.append("DEEPGRAM_API_KEY=\(key)")
         }
 
-        // Ensure ENGINE=deepgram is set
         if !lines.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("ENGINE=") }) {
             lines.append("ENGINE=deepgram")
         }
@@ -214,64 +224,171 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engineItem = NSMenuItem(title: "Engine: \(engine.rawValue)", action: nil, keyEquivalent: "")
         engineItem.isEnabled = false
         menu.addItem(engineItem)
+
         menu.addItem(NSMenuItem.separator())
 
-        let autoPasteItem = NSMenuItem(title: "Auto-Paste", action: #selector(toggleAutoPaste(_:)), keyEquivalent: "")
-        autoPasteItem.state = autoPaste ? .on : .off
-        menu.addItem(autoPasteItem)
+        // Hardcoded hotkey info (disabled, informational)
+        let fnItem = NSMenuItem(title: "Left \u{2303} hold: Push-to-Talk", action: nil, keyEquivalent: "")
+        fnItem.isEnabled = false
+        menu.addItem(fnItem)
+
+        let fnSpaceItem = NSMenuItem(title: "Left \u{2303} tap: Hands-Free Toggle", action: nil, keyEquivalent: "")
+        fnSpaceItem.isEnabled = false
+        menu.addItem(fnSpaceItem)
+
         menu.addItem(NSMenuItem.separator())
 
+        // History submenu
+        let historyItem = NSMenuItem(title: "History", action: nil, keyEquivalent: "")
+        let histSubmenu = NSMenu()
+        historyItem.submenu = histSubmenu
+        self.historyMenu = histSubmenu
+        menu.addItem(historyItem)
+        updateHistoryMenu()
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Help submenu
+        let helpItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: "")
+        let helpSubmenu = NSMenu()
+
+        let helpLines: [(String, Bool)] = [
+            ("Hotkeys:", false),
+            ("  Hold Left \u{2303} \u{2014} Push-to-Talk", false),
+            ("    (hold, speak, release \u{2192} auto-paste)", false),
+            ("  Tap Left \u{2303} \u{2014} Hands-Free Toggle", false),
+            ("    (tap to start, tap to stop \u{2192} auto-paste)", false),
+            ("", false),
+            ("Terminal commands:", false),
+            ("  Restart: pkill VoiceToText && open -a VoiceToText", false),
+            ("  Logs: tail -f ~/.voice-to-text.log", false),
+            ("  Config: ~/.config/voice-to-text/config", false),
+        ]
+        for (text, enabled) in helpLines {
+            if text.isEmpty {
+                helpSubmenu.addItem(NSMenuItem.separator())
+            } else {
+                let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+                item.isEnabled = enabled
+                helpSubmenu.addItem(item)
+            }
+        }
+
+        helpItem.submenu = helpSubmenu
+        menu.addItem(helpItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        menu.addItem(NSMenuItem(title: "Restart", action: #selector(restartApp), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Quit Voice-to-Text", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
     }
 
+    private func removeKeyMonitors() {
+        if let m = globalFlagsMonitor   { NSEvent.removeMonitor(m); globalFlagsMonitor = nil }
+        if let m = localFlagsMonitor    { NSEvent.removeMonitor(m); localFlagsMonitor = nil }
+        if let m = globalKeyDownMonitor { NSEvent.removeMonitor(m); globalKeyDownMonitor = nil }
+        if let m = localKeyDownMonitor  { NSEvent.removeMonitor(m); localKeyDownMonitor = nil }
+    }
+
     private func setupKeyMonitors() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        removeKeyMonitors()
+
+        // flagsChanged monitors (detect Fn press/release)
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.handleFlagsChanged(event, source: "global")
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             self?.handleFlagsChanged(event, source: "local")
             return event
         }
-        Log.info("Key monitors installed")
+
+        // keyDown monitors (detect Space while Fn is held)
+        globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleKeyDown(event, source: "global")
+        }
+        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.handleKeyDown(event, source: "local")
+            return event
+        }
+
+        Log.info("Installed key monitors (flagsChanged, keyDown)")
     }
 
     // MARK: - Key handling
 
     private func handleFlagsChanged(_ event: NSEvent, source: String) {
-        guard event.keyCode == 54, event.modifierFlags.contains(.command) else { return }
+        // Only interested in Left Control (keyCode 59)
+        guard event.keyCode == 59 else { return }
 
-        let now = ProcessInfo.processInfo.systemUptime
-        guard now - lastToggleTime > 0.5 else {
-            Log.info("Debounced (\(source)) — skipping")
-            return
-        }
-        lastToggleTime = now
+        let ctrlDown = event.modifierFlags.contains(.control)
 
-        Log.info("Right CMD pressed (\(source)), state=\(state)")
-        DispatchQueue.main.async { [weak self] in
-            self?.toggleRecording()
+        if ctrlDown {
+            // Left Control pressed down
+            let now = ProcessInfo.processInfo.systemUptime
+            ctrlPressTime = now
+
+            // If we're in hands-free recording, a press means stop
+            if isHandsFree && state == .recording {
+                Log.info("Hands-free stop (Left Ctrl) (\(source)), state=\(state)")
+                isHandsFree = false
+                NSSound(named: "Submarine")?.play()
+                stopRecordingAndTranscribe()
+                return
+            }
+
+            // Schedule PTT start after 0.3s
+            // If released before that, it's a quick tap → toggle hands-free
+            let task = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                guard self.state == .idle else { return }
+                Log.info("PTT start (Left Ctrl held) (\(source)), state=\(self.state)")
+                self.isPTTActive = true
+                self.startRecording()
+            }
+            pttDelayTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: task)
+        } else {
+            // Left Control released
+            let now = ProcessInfo.processInfo.systemUptime
+            let holdDuration = now - ctrlPressTime
+
+            pttDelayTask?.cancel()
+            pttDelayTask = nil
+
+            if isPTTActive && state == .recording {
+                // PTT release → stop recording
+                Log.info("PTT stop (Left Ctrl released, held \(String(format: "%.2f", holdDuration))s) (\(source))")
+                isPTTActive = false
+                stopRecordingAndTranscribe()
+            } else if !isPTTActive && state == .idle && holdDuration < 0.3 {
+                // Quick tap → toggle hands-free on
+                Log.info("Hands-free start (Left Ctrl tap) (\(source))")
+                isHandsFree = true
+                startRecording()
+            }
+
+            isPTTActive = false
+            ctrlPressTime = 0
         }
+    }
+
+    private func handleKeyDown(_ event: NSEvent, source: String) {
+        // Currently unused — all logic is via Left Control flagsChanged
     }
 
     // MARK: - State machine
 
-    private func toggleRecording() {
-        switch state {
-        case .idle:
-            startRecording()
-        case .recording:
-            stopRecordingAndTranscribe()
-        case .processing:
-            Log.info("Ignoring — still processing")
-        }
-    }
-
     private func startRecording() {
+        guard state == .idle else {
+            Log.info("Cannot start recording, state=\(state)")
+            return
+        }
+
         // Check that at least one engine is available
         guard deepgram != nil || whisper != nil else {
             Log.info("ERROR: No transcription engine available")
-            hud.show("No engine available", icon: "⚠️")
+            hud.show("No engine available", icon: "\u{26A0}\u{FE0F}")
             return
         }
 
@@ -283,11 +400,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state = .recording
             updateIcon(for: .recording)
             NSSound(named: "Tink")?.play()
-            hud.showRecording("Recording...", icon: "🔴")
+            hud.showRecording("Recording...", icon: "\u{1F534}")
             Log.info("Recording STARTED")
         } catch {
             Log.info("Failed to start recording: \(error)")
-            hud.show("Mic error: \(error.localizedDescription)", icon: "❌")
+            hud.show("Mic error: \(error.localizedDescription)", icon: "\u{274C}")
         }
     }
 
@@ -303,7 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state = .idle
             updateIcon(for: .idle)
             Log.info("WARNING: Empty audio buffer")
-            hud.show("No audio recorded", icon: "❌")
+            hud.show("No audio recorded", icon: "\u{274C}")
             return
         }
 
@@ -319,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .whisper:
             estimatedTime = max(audioSeconds / 2.0 + 1.0, 3.0)
         }
-        hud.showWithProgress("Recognizing (\(engineLabel))...", icon: "⏳", estimatedDuration: estimatedTime)
+        hud.showWithProgress("Recognizing (\(engineLabel))...", icon: "\u{23F3}", estimatedDuration: estimatedTime)
 
         let wavData = WavEncoder.encode(pcmData: pcmData)
         Log.info("WAV: \(wavData.count) bytes, sending to \(engineLabel)...")
@@ -342,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     state = .idle
                     updateIcon(for: .idle)
-                    hud.show("Error: \(error.localizedDescription)", icon: "❌", duration: 5)
+                    hud.show("Error: \(error.localizedDescription)", icon: "\u{274C}", duration: 5)
                 }
             }
         }
@@ -354,10 +471,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if text.isEmpty {
             NSSound(named: "Basso")?.play()
-            hud.show("No speech detected", icon: "❌")
+            hud.show("No speech detected", icon: "\u{274C}")
             return
         }
 
+        // Always copy to clipboard
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
@@ -365,17 +483,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSSound(named: "Purr")?.play()
         Log.info("Copied to clipboard: \"\(text)\"")
 
-        if autoPaste {
-            // Dispatch paste on a background thread to avoid blocking main thread with usleep
-            DispatchQueue.global(qos: .userInteractive).async {
-                self.simulatePaste()
-            }
-            // Show HUD after paste so it doesn't interfere with focus
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.hud.show(text, icon: "✅", duration: 2)
-            }
-        } else {
-            hud.show(text, icon: "✅", duration: 4)
+        // Add to history
+        addToHistory(text)
+
+        // Always auto-paste
+        DispatchQueue.global(qos: .userInteractive).async {
+            self.simulatePaste()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.hud.show(text, icon: "\u{2705}", duration: 2)
         }
     }
 
@@ -404,10 +520,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch state {
         case .idle:
-            imageName = autoPaste ? "mic.circle.fill" : "mic"
+            imageName = "mic"
             config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         case .recording:
-            imageName = autoPaste ? "mic.circle.fill" : "mic.fill"
+            imageName = "mic.fill"
             config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
         case .processing:
@@ -421,42 +537,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("Icon updated: \(imageName), image=\(img != nil ? "OK" : "NIL")")
     }
 
-    // MARK: - Actions
+    // MARK: - History
 
-    @objc private func toggleAutoPaste(_ sender: NSMenuItem) {
-        autoPaste.toggle()
-        sender.state = autoPaste ? .on : .off
-        Log.info("Auto-paste: \(autoPaste), state=\(state)")
-        updateIcon(for: state)
-        saveAutoPasteToConfig()
+    private var historyFilePath: String {
+        NSString("~/.config/voice-to-text/history.json").expandingTildeInPath
     }
 
-    private func saveAutoPasteToConfig() {
-        let configPath = NSString("~/.config/voice-to-text/config").expandingTildeInPath
-        var lines: [String] = []
-        if let contents = try? String(contentsOfFile: configPath, encoding: .utf8) {
-            lines = contents.components(separatedBy: .newlines)
+    private func loadHistory() {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: historyFilePath)) else {
+            Log.info("No history file found, starting fresh")
+            return
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            history = try decoder.decode([HistoryEntry].self, from: data)
+            Log.info("Loaded \(history.count) history entries")
+        } catch {
+            Log.info("Failed to decode history: \(error)")
+        }
+    }
+
+    private func saveHistory() {
+        let configDir = NSString("~/.config/voice-to-text").expandingTildeInPath
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(history)
+            try data.write(to: URL(fileURLWithPath: historyFilePath))
+            Log.info("Saved \(history.count) history entries")
+        } catch {
+            Log.info("Failed to save history: \(error)")
+        }
+    }
+
+    private func addToHistory(_ text: String) {
+        let entry = HistoryEntry(date: Date(), text: text)
+        history.insert(entry, at: 0)
+        if history.count > 50 {
+            history = Array(history.prefix(50))
+        }
+        saveHistory()
+        updateHistoryMenu()
+    }
+
+    private func updateHistoryMenu() {
+        guard let menu = historyMenu else { return }
+        menu.removeAllItems()
+
+        if history.isEmpty {
+            let emptyItem = NSMenuItem(title: "No history", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+            return
         }
 
-        // Update or add AUTO_PASTE line
-        var found = false
-        for i in lines.indices {
-            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("AUTO_PASTE=") {
-                lines[i] = "AUTO_PASTE=\(autoPaste)"
-                found = true
-                break
+        let timeFormatter = DateFormatter()
+        timeFormatter.dateFormat = "HH:mm"
+
+        for (index, entry) in history.enumerated() {
+            let timeStr = timeFormatter.string(from: entry.date)
+            let truncated: String
+            if entry.text.count > 60 {
+                truncated = String(entry.text.prefix(60)) + "..."
+            } else {
+                truncated = entry.text
             }
-        }
-        if !found {
-            lines.append("AUTO_PASTE=\(autoPaste)")
+            let title = "\(timeStr) \u{2014} \(truncated)"
+            let item = NSMenuItem(title: title, action: #selector(copyHistoryItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.representedObject = entry.text
+            menu.addItem(item)
         }
 
-        // Remove trailing empty lines, then ensure final newline
-        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
-            lines.removeLast()
-        }
-        let output = lines.joined(separator: "\n") + "\n"
-        try? output.write(toFile: configPath, atomically: true, encoding: .utf8)
+        menu.addItem(NSMenuItem.separator())
+
+        let clearItem = NSMenuItem(title: "Clear History", action: #selector(clearHistory), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
+    }
+
+    @objc private func copyHistoryItem(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        hud.show("Copied to clipboard", icon: "\u{2705}", duration: 2)
+        Log.info("Copied history item to clipboard: \"\(text.prefix(60))...\"")
+    }
+
+    @objc private func clearHistory() {
+        history.removeAll()
+        saveHistory()
+        updateHistoryMenu()
+        Log.info("History cleared")
+    }
+
+    // MARK: - Actions
+
+    @objc private func restartApp() {
+        let url = Bundle.main.bundleURL
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = [url.path]
+        try? task.run()
+        NSApplication.shared.terminate(nil)
     }
 
     @objc private func quitApp() {
