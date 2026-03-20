@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var deepgram: DeepgramClient?
     private var whisper: WhisperClient?
     private var engine: Engine = .whisper
+    private var autoPaste: Bool = false
     private let hud = HUD()
 
     // Key monitoring
@@ -69,10 +70,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         engine = e
                     }
                 }
+                if trimmed.hasPrefix("AUTO_PASTE=") {
+                    let value = String(trimmed.dropFirst("AUTO_PASTE=".count))
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+                        .lowercased()
+                    autoPaste = (value == "true" || value == "1" || value == "yes")
+                }
             }
         }
 
-        Log.info("Engine: \(engine)")
+        Log.info("Engine: \(engine), autoPaste: \(autoPaste)")
 
         switch engine {
         case .whisper:
@@ -99,13 +106,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupDeepgramClient() {
-        let key = loadAPIKey()
+        var key = loadAPIKey()
+        if key == nil {
+            key = promptForAPIKey()
+        }
         deepgram = DeepgramClient(apiKey: key)
         if deepgram == nil {
             Log.info("WARNING: DEEPGRAM_API_KEY not set")
+            hud.show("API key required — click menu bar icon", icon: "⚠️", duration: 5)
         } else {
             Log.info("Deepgram client OK (key: \(key!.prefix(8))...)")
         }
+    }
+
+    private func promptForAPIKey() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Deepgram API Key"
+        alert.informativeText = "Enter your Deepgram API key.\nGet one free at console.deepgram.com"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
+        input.placeholderString = "paste your API key here"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return nil }
+
+        let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+
+        // Save to config
+        let configDir = NSString("~/.config/voice-to-text").expandingTildeInPath
+        try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        let configPath = configDir + "/config"
+
+        var lines: [String] = []
+        if let contents = try? String(contentsOfFile: configPath, encoding: .utf8) {
+            lines = contents.components(separatedBy: .newlines)
+        }
+
+        var found = false
+        for i in lines.indices {
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("DEEPGRAM_API_KEY=") {
+                lines[i] = "DEEPGRAM_API_KEY=\(key)"
+                found = true
+                break
+            }
+        }
+        if !found {
+            lines.append("DEEPGRAM_API_KEY=\(key)")
+        }
+
+        // Ensure ENGINE=deepgram is set
+        if !lines.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("ENGINE=") }) {
+            lines.append("ENGINE=deepgram")
+        }
+
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            lines.removeLast()
+        }
+        let output = lines.joined(separator: "\n") + "\n"
+        try? output.write(toFile: configPath, atomically: true, encoding: .utf8)
+        Log.info("API key saved to config")
+
+        return key
     }
 
     private func checkAccessibility() {
@@ -146,6 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engineItem = NSMenuItem(title: "Engine: \(engine.rawValue)", action: nil, keyEquivalent: "")
         engineItem.isEnabled = false
         menu.addItem(engineItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let autoPasteItem = NSMenuItem(title: "Auto-Paste", action: #selector(toggleAutoPaste(_:)), keyEquivalent: "")
+        autoPasteItem.state = autoPaste ? .on : .off
+        menu.addItem(autoPasteItem)
         menu.addItem(NSMenuItem.separator())
 
         menu.addItem(NSMenuItem(title: "Quit Voice-to-Text", action: #selector(quitApp), keyEquivalent: "q"))
@@ -280,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateIcon(for: .idle)
 
         if text.isEmpty {
+            NSSound(named: "Basso")?.play()
             hud.show("No speech detected", icon: "❌")
             return
         }
@@ -288,8 +362,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
 
+        NSSound(named: "Purr")?.play()
         Log.info("Copied to clipboard: \"\(text)\"")
-        hud.show(text, icon: "✅", duration: 4)
+
+        if autoPaste {
+            // Dispatch paste on a background thread to avoid blocking main thread with usleep
+            DispatchQueue.global(qos: .userInteractive).async {
+                self.simulatePaste()
+            }
+            // Show HUD after paste so it doesn't interfere with focus
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.hud.show(text, icon: "✅", duration: 2)
+            }
+        } else {
+            hud.show(text, icon: "✅", duration: 4)
+        }
+    }
+
+    private func simulatePaste() {
+        let src = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false) else {
+            Log.info("WARNING: Failed to create CGEvent for paste")
+            return
+        }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        usleep(50_000)
+        keyUp.post(tap: .cghidEventTap)
+        Log.info("Auto-pasted via Cmd+V")
     }
 
     // MARK: - UI
@@ -302,10 +404,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch state {
         case .idle:
-            imageName = "mic"
+            imageName = autoPaste ? "mic.circle.fill" : "mic"
             config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         case .recording:
-            imageName = "mic.fill"
+            imageName = autoPaste ? "mic.circle.fill" : "mic.fill"
             config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
         case .processing:
@@ -313,11 +415,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
         }
 
-        button.image = NSImage(systemSymbolName: imageName, accessibilityDescription: "Voice-to-Text")?
+        let img = NSImage(systemSymbolName: imageName, accessibilityDescription: "Voice-to-Text")?
             .withSymbolConfiguration(config)
+        button.image = img
+        Log.info("Icon updated: \(imageName), image=\(img != nil ? "OK" : "NIL")")
     }
 
     // MARK: - Actions
+
+    @objc private func toggleAutoPaste(_ sender: NSMenuItem) {
+        autoPaste.toggle()
+        sender.state = autoPaste ? .on : .off
+        Log.info("Auto-paste: \(autoPaste), state=\(state)")
+        updateIcon(for: state)
+        saveAutoPasteToConfig()
+    }
+
+    private func saveAutoPasteToConfig() {
+        let configPath = NSString("~/.config/voice-to-text/config").expandingTildeInPath
+        var lines: [String] = []
+        if let contents = try? String(contentsOfFile: configPath, encoding: .utf8) {
+            lines = contents.components(separatedBy: .newlines)
+        }
+
+        // Update or add AUTO_PASTE line
+        var found = false
+        for i in lines.indices {
+            if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("AUTO_PASTE=") {
+                lines[i] = "AUTO_PASTE=\(autoPaste)"
+                found = true
+                break
+            }
+        }
+        if !found {
+            lines.append("AUTO_PASTE=\(autoPaste)")
+        }
+
+        // Remove trailing empty lines, then ensure final newline
+        while let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            lines.removeLast()
+        }
+        let output = lines.joined(separator: "\n") + "\n"
+        try? output.write(toFile: configPath, atomically: true, encoding: .utf8)
+    }
 
     @objc private func quitApp() {
         NSApplication.shared.terminate(nil)
