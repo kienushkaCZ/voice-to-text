@@ -44,8 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localKeyDownMonitor: Any?
     private var lastToggleTime: TimeInterval = 0
 
-    // Left Control key logic
-    private var ctrlPressTime: TimeInterval = 0
+    // Right Command key logic
+    private var cmdPressTime: TimeInterval = 0
     private var pttDelayTask: DispatchWorkItem?
     private var isPTTActive: Bool = false
     private var isHandsFree: Bool = false
@@ -65,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         checkAccessibility()
         setupKeyMonitors()
-        Log.info("Setup complete, engine=\(engine), Left Ctrl hold=PTT, Left Ctrl tap=Toggle, ready")
+        Log.info("Setup complete, engine=\(engine), Right Cmd hold=PTT, Right Cmd tap=Toggle, ready")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -228,11 +228,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Hardcoded hotkey info (disabled, informational)
-        let fnItem = NSMenuItem(title: "Left \u{2303} hold: Push-to-Talk", action: nil, keyEquivalent: "")
+        let fnItem = NSMenuItem(title: "Right \u{2318} hold: Push-to-Talk", action: nil, keyEquivalent: "")
         fnItem.isEnabled = false
         menu.addItem(fnItem)
 
-        let fnSpaceItem = NSMenuItem(title: "Left \u{2303} tap: Hands-Free Toggle", action: nil, keyEquivalent: "")
+        let fnSpaceItem = NSMenuItem(title: "Right \u{2318} tap: Hands-Free Toggle", action: nil, keyEquivalent: "")
         fnSpaceItem.isEnabled = false
         menu.addItem(fnSpaceItem)
 
@@ -254,9 +254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let helpLines: [(String, Bool)] = [
             ("Hotkeys:", false),
-            ("  Hold Left \u{2303} \u{2014} Push-to-Talk", false),
+            ("  Hold Right \u{2318} \u{2014} Push-to-Talk", false),
             ("    (hold, speak, release \u{2192} auto-paste)", false),
-            ("  Tap Left \u{2303} \u{2014} Hands-Free Toggle", false),
+            ("  Tap Right \u{2318} \u{2014} Hands-Free Toggle", false),
             ("    (tap to start, tap to stop \u{2192} auto-paste)", false),
             ("", false),
             ("Terminal commands:", false),
@@ -318,19 +318,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Key handling
 
     private func handleFlagsChanged(_ event: NSEvent, source: String) {
-        // Only interested in Left Control (keyCode 59)
-        guard event.keyCode == 59 else { return }
+        // Only interested in Right Command (keyCode 54)
+        guard event.keyCode == 54 else { return }
 
-        let ctrlDown = event.modifierFlags.contains(.control)
+        let cmdDown = event.modifierFlags.contains(.command)
 
-        if ctrlDown {
-            // Left Control pressed down
+        if cmdDown {
+            // Right Command pressed down
             let now = ProcessInfo.processInfo.systemUptime
-            ctrlPressTime = now
+            cmdPressTime = now
 
             // If we're in hands-free recording, a press means stop
             if isHandsFree && state == .recording {
-                Log.info("Hands-free stop (Left Ctrl) (\(source)), state=\(state)")
+                Log.info("Hands-free stop (Right Cmd) (\(source)), state=\(state)")
                 isHandsFree = false
                 NSSound(named: "Submarine")?.play()
                 stopRecordingAndTranscribe()
@@ -342,34 +342,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let task = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 guard self.state == .idle else { return }
-                Log.info("PTT start (Left Ctrl held) (\(source)), state=\(self.state)")
+                Log.info("PTT start (Right Cmd held) (\(source)), state=\(self.state)")
                 self.isPTTActive = true
                 self.startRecording()
             }
             pttDelayTask = task
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: task)
         } else {
-            // Left Control released
+            // Right Command released
             let now = ProcessInfo.processInfo.systemUptime
-            let holdDuration = now - ctrlPressTime
+            let holdDuration = now - cmdPressTime
 
             pttDelayTask?.cancel()
             pttDelayTask = nil
 
             if isPTTActive && state == .recording {
                 // PTT release → stop recording
-                Log.info("PTT stop (Left Ctrl released, held \(String(format: "%.2f", holdDuration))s) (\(source))")
+                Log.info("PTT stop (Right Cmd released, held \(String(format: "%.2f", holdDuration))s) (\(source))")
                 isPTTActive = false
                 stopRecordingAndTranscribe()
             } else if !isPTTActive && state == .idle && holdDuration < 0.3 {
                 // Quick tap → toggle hands-free on
-                Log.info("Hands-free start (Left Ctrl tap) (\(source))")
+                Log.info("Hands-free start (Right Cmd tap) (\(source))")
                 isHandsFree = true
                 startRecording()
             }
 
             isPTTActive = false
-            ctrlPressTime = 0
+            cmdPressTime = 0
         }
     }
 
