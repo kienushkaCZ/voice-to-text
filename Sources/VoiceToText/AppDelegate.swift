@@ -50,6 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isPTTActive: Bool = false
     private var isHandsFree: Bool = false
 
+    // Safety timeout
+    private var stateTimeoutTask: DispatchWorkItem?
+
     // Transcription history
     private var history: [HistoryEntry] = []
     private var historyMenu: NSMenu?
@@ -401,6 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateIcon(for: .recording)
             NSSound(named: "Tink")?.play()
             hud.showRecording("Recording...", icon: "\u{1F534}")
+            scheduleStateTimeout(for: .recording, seconds: 120)
             Log.info("Recording STARTED")
         } catch {
             Log.info("Failed to start recording: \(error)")
@@ -409,11 +413,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopRecordingAndTranscribe() {
+        cancelStateTimeout()
         recorder.onLevel = nil
         let pcmData = recorder.stop()
         state = .processing
         updateIcon(for: .processing)
         NSSound(named: "Pop")?.play()
+        scheduleStateTimeout(for: .processing, seconds: 30)
         Log.info("Recording STOPPED, PCM: \(pcmData.count) bytes")
 
         guard !pcmData.isEmpty else {
@@ -457,6 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 Log.info("Transcription error: \(error)")
                 await MainActor.run {
+                    cancelStateTimeout()
                     state = .idle
                     updateIcon(for: .idle)
                     hud.show("Error: \(error.localizedDescription)", icon: "\u{274C}", duration: 5)
@@ -466,6 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleTranscription(_ text: String) {
+        cancelStateTimeout()
         state = .idle
         updateIcon(for: .idle)
 
@@ -508,6 +516,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         usleep(50_000)
         keyUp.post(tap: .cghidEventTap)
         Log.info("Auto-pasted via Cmd+V")
+    }
+
+    // MARK: - Safety timeout
+
+    private func scheduleStateTimeout(for expectedState: State, seconds: TimeInterval) {
+        stateTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.state == expectedState else { return }
+            Log.info("Safety timeout: stuck in \(expectedState) for \(Int(seconds))s, resetting to idle")
+            if expectedState == .recording {
+                self.recorder.onLevel = nil
+                _ = self.recorder.stop()
+                self.isPTTActive = false
+                self.isHandsFree = false
+            }
+            self.state = .idle
+            self.updateIcon(for: .idle)
+            self.hud.show("Reset (timeout)", icon: "⏱", duration: 2)
+        }
+        stateTimeoutTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: task)
+    }
+
+    private func cancelStateTimeout() {
+        stateTimeoutTask?.cancel()
+        stateTimeoutTask = nil
     }
 
     // MARK: - UI
@@ -577,8 +611,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func addToHistory(_ text: String) {
         let entry = HistoryEntry(date: Date(), text: text)
         history.insert(entry, at: 0)
-        if history.count > 50 {
-            history = Array(history.prefix(50))
+        if history.count > 10 {
+            history = Array(history.prefix(10))
         }
         saveHistory()
         updateHistoryMenu()
