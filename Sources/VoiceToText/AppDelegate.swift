@@ -404,7 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateIcon(for: .recording)
             NSSound(named: "Tink")?.play()
             hud.showRecording("Recording...", icon: "\u{1F534}")
-            scheduleStateTimeout(for: .recording, seconds: 120)
+            scheduleStateTimeout(for: .recording, seconds: 900)
             Log.info("Recording STARTED")
         } catch {
             Log.info("Failed to start recording: \(error)")
