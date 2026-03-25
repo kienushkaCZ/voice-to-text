@@ -156,7 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return nil }
 
-        // Save to config
+        saveAPIKey(key)
+        return key
+    }
+
+    private func saveAPIKey(_ key: String) {
         let configDir = NSString("~/.config/voice-to-text").expandingTildeInPath
         try? FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
         let configPath = configDir + "/config"
@@ -188,8 +192,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let output = lines.joined(separator: "\n") + "\n"
         try? output.write(toFile: configPath, atomically: true, encoding: .utf8)
         Log.info("API key saved to config")
-
-        return key
     }
 
     private func checkAccessibility() {
@@ -721,15 +723,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func changeAPIKey() {
-        if let key = promptForAPIKey() {
-            deepgram = DeepgramClient(apiKey: key)
-            if deepgram != nil {
-                Log.info("API key updated, Deepgram client reinitialized")
-                hud.show("API key saved", icon: "\u{2705}", duration: 2)
-                engine = .deepgram
-            } else {
-                Log.info("WARNING: new API key rejected by DeepgramClient")
-                hud.show("Invalid API key", icon: "\u{26A0}\u{FE0F}", duration: 3)
+        let currentKey = loadAPIKey()
+
+        let alert = NSAlert()
+        alert.messageText = "Deepgram API Key"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Change Key")
+        alert.addButton(withTitle: "Close")
+
+        // Build accessory view
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 80))
+
+        // Current key display
+        let keyLabel = NSTextField(labelWithString: "Current key:")
+        keyLabel.frame = NSRect(x: 0, y: 56, width: 80, height: 20)
+        container.addSubview(keyLabel)
+
+        let maskedKey: String
+        let statusText: String
+        if let key = currentKey, !key.isEmpty {
+            let prefix = String(key.prefix(6))
+            let suffix = String(key.suffix(4))
+            maskedKey = "\(prefix)••••••\(suffix)"
+            statusText = "Checking..."
+        } else {
+            maskedKey = "Not set"
+            statusText = "No key"
+        }
+
+        let keyValue = NSTextField(labelWithString: maskedKey)
+        keyValue.frame = NSRect(x: 82, y: 56, width: 180, height: 20)
+        keyValue.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        container.addSubview(keyValue)
+
+        let statusLabel = NSTextField(labelWithString: statusText)
+        statusLabel.frame = NSRect(x: 264, y: 56, width: 76, height: 20)
+        statusLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        container.addSubview(statusLabel)
+
+        // New key input
+        let newLabel = NSTextField(labelWithString: "New key:")
+        newLabel.frame = NSRect(x: 0, y: 20, width: 80, height: 20)
+        container.addSubview(newLabel)
+
+        let input = NSTextField(frame: NSRect(x: 82, y: 18, width: 258, height: 24))
+        input.placeholderString = "paste new API key here"
+        container.addSubview(input)
+
+        let hintLabel = NSTextField(labelWithString: "Get a free key at console.deepgram.com")
+        hintLabel.frame = NSRect(x: 82, y: 0, width: 258, height: 16)
+        hintLabel.font = NSFont.systemFont(ofSize: 10)
+        hintLabel.textColor = .secondaryLabelColor
+        container.addSubview(hintLabel)
+
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = input
+
+        // Validate current key in background
+        if currentKey != nil {
+            let keyToCheck = currentKey!
+            Task {
+                let valid = await DeepgramClient.validateKey(keyToCheck)
+                await MainActor.run {
+                    if valid {
+                        statusLabel.stringValue = "\u{2705} Valid"
+                        statusLabel.textColor = .systemGreen
+                    } else {
+                        statusLabel.stringValue = "\u{274C} Invalid"
+                        statusLabel.textColor = .systemRed
+                    }
+                }
+            }
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+
+        guard response == .alertFirstButtonReturn else { return }
+
+        let newKey = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newKey.isEmpty else {
+            hud.show("No key entered", icon: "\u{26A0}\u{FE0F}", duration: 2)
+            return
+        }
+
+        // Validate new key synchronously with a spinner
+        hud.show("Validating key...", icon: "\u{23F3}", duration: 10)
+
+        Task {
+            let valid = await DeepgramClient.validateKey(newKey)
+            await MainActor.run {
+                if valid {
+                    self.saveAPIKey(newKey)
+                    self.deepgram = DeepgramClient(apiKey: newKey)
+                    self.engine = .deepgram
+                    Log.info("API key updated and validated")
+                    self.hud.show("API key saved \u{2705}", icon: "\u{2705}", duration: 2)
+                } else {
+                    Log.info("New API key validation failed")
+                    self.hud.show("Invalid API key \u{274C}", icon: "\u{274C}", duration: 3)
+                }
             }
         }
     }

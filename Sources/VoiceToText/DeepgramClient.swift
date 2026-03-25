@@ -34,6 +34,16 @@ final class DeepgramClient {
         return transcript
     }
 
+    static func validateKey(_ key: String) async -> Bool {
+        let url = URL(string: "https://api.deepgram.com/v1/projects")!
+        var request = URLRequest(url: url)
+        request.setValue("Token \(key)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 10
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return http.statusCode == 200
+    }
+
     enum DeepgramError: Error, LocalizedError {
         case invalidResponse
         case apiError(statusCode: Int, message: String)
