@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Safety timeout
     private var stateTimeoutTask: DispatchWorkItem?
 
+    // Cancellation
+    private var transcriptionTask: Task<Void, Never>?
+
     // Transcription history
     private var history: [HistoryEntry] = []
     private var historyMenu: NSMenu?
@@ -239,6 +242,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnSpaceItem.isEnabled = false
         menu.addItem(fnSpaceItem)
 
+        let escItem = NSMenuItem(title: "Esc: Cancel recognition", action: nil, keyEquivalent: "")
+        escItem.isEnabled = false
+        menu.addItem(escItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // History submenu
@@ -261,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("    (hold, speak, release \u{2192} auto-paste)", false),
             ("  Tap Right \u{2318} \u{2014} Hands-Free Toggle", false),
             ("    (tap to start, tap to stop \u{2192} auto-paste)", false),
+            ("  Esc \u{2014} Cancel recognition", false),
             ("", false),
             ("Terminal commands:", false),
             ("  Restart: pkill VoiceToText && open -a VoiceToText", false),
@@ -377,7 +385,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleKeyDown(_ event: NSEvent, source: String) {
-        // Currently unused — all logic is via Left Control flagsChanged
+        // Escape (keyCode 53) cancels recording or processing
+        guard event.keyCode == 53 else { return }
+
+        switch state {
+        case .recording, .processing:
+            Log.info("Escape pressed (\(source)), cancelling from state=\(state)")
+            cancelRecognition()
+        case .idle:
+            break
+        }
     }
 
     // MARK: - State machine
@@ -447,7 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wavData = WavEncoder.encode(pcmData: pcmData)
         Log.info("WAV: \(wavData.count) bytes, sending to \(engineLabel)...")
 
-        Task {
+        transcriptionTask = Task {
             do {
                 let transcript: String
                 switch engine {
@@ -455,6 +472,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     transcript = try whisper!.transcribe(wavData: wavData)
                 case .deepgram:
                     transcript = try await deepgram!.transcribe(wavData: wavData)
+                }
+                guard !Task.isCancelled else {
+                    Log.info("Transcription task was cancelled, discarding result")
+                    return
                 }
                 Log.info("Transcript: \"\(transcript)\"")
                 await MainActor.run {
@@ -470,6 +491,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func cancelRecognition() {
+        cancelStateTimeout()
+
+        if state == .recording {
+            recorder.onLevel = nil
+            _ = recorder.stop()
+        }
+
+        if state == .processing {
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+        }
+
+        isPTTActive = false
+        isHandsFree = false
+        state = .idle
+        updateIcon(for: .idle)
+        NSSound(named: "Funk")?.play()
+        hud.show("Cancelled", icon: "\u{270B}", duration: 1.5)
+        Log.info("Recognition CANCELLED by Escape")
     }
 
     private func handleTranscription(_ text: String) {
