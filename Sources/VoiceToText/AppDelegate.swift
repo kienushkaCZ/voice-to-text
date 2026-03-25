@@ -290,6 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        menu.addItem(NSMenuItem(title: "API Key...", action: #selector(changeAPIKey), keyEquivalent: "k"))
+
+        menu.addItem(NSMenuItem.separator())
+
         menu.addItem(NSMenuItem(title: "Restart", action: #selector(restartApp), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Quit Voice-to-Text", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -715,6 +719,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Actions
+
+    @objc private func changeAPIKey() {
+        if let key = promptForAPIKey() {
+            deepgram = DeepgramClient(apiKey: key)
+            if deepgram != nil {
+                Log.info("API key updated, Deepgram client reinitialized")
+                hud.show("API key saved", icon: "\u{2705}", duration: 2)
+                engine = .deepgram
+            } else {
+                Log.info("WARNING: new API key rejected by DeepgramClient")
+                hud.show("Invalid API key", icon: "\u{26A0}\u{FE0F}", duration: 3)
+            }
+        }
+    }
 
     @objc private func restartApp() {
         let url = Bundle.main.bundleURL
