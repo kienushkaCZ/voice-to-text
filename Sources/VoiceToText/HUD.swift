@@ -1,6 +1,8 @@
 import Cocoa
 
-final class HUD {
+final class HUD: NSObject {
+    var onCancel: (() -> Void)?
+
     private var window: NSWindow?
     private var hideTimer: Timer?
     private var progressTimer: Timer?
@@ -10,6 +12,27 @@ final class HUD {
     private var progressEstimatedDuration: TimeInterval = 10
     private var baseMessage: String = ""
     private var levelView: AudioLevelView?
+
+    @objc private func cancelTapped() {
+        onCancel?()
+    }
+
+    private func makeCancelButton() -> NSButton {
+        let btn = NSButton()
+        btn.isBordered = false
+        btn.bezelStyle = .inline
+        btn.imagePosition = .imageOnly
+        if let img = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel") {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
+            btn.image = img.withSymbolConfiguration(cfg)
+        }
+        btn.contentTintColor = .secondaryLabelColor
+        btn.target = self
+        btn.action = #selector(cancelTapped)
+        btn.toolTip = "Cancel"
+        btn.setContentHuggingPriority(.required, for: .horizontal)
+        return btn
+    }
 
     /// Show a floating HUD near the menu bar with an icon and message.
     func show(_ message: String, icon: String, duration: TimeInterval = 3.0) {
@@ -163,7 +186,7 @@ final class HUD {
             let lv = AudioLevelView()
             self.levelView = lv
 
-            let row = NSStackView(views: [textLabel, lv])
+            let row = NSStackView(views: [textLabel, lv, makeCancelButton()])
             row.orientation = .horizontal
             row.spacing = 10
             row.alignment = .centerY
@@ -195,7 +218,11 @@ final class HUD {
                 progress.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
             ])
 
-            rightColumn = vertStack
+            let row = NSStackView(views: [vertStack, makeCancelButton()])
+            row.orientation = .horizontal
+            row.spacing = 10
+            row.alignment = .centerY
+            rightColumn = row
 
         case .simple:
             let textLabel = NSTextField(wrappingLabelWithString: message)

@@ -62,7 +62,7 @@ cat > "$CONTENTS_DIR/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign "VoiceToText Dev" "$APP_DIR"
+codesign --force --sign - "$APP_DIR"
 echo "==> App bundle created: $APP_DIR"
 
 # Install to /Applications (kill running app, replace, relaunch)
@@ -90,8 +90,8 @@ else
             cp "$RESOURCES_DIR/AppIcon.icns" "$INSTALLED_APP/Contents/Resources/AppIcon.icns"
         fi
         cp "$CONTENTS_DIR/Info.plist" "$INSTALLED_APP/Contents/Info.plist"
-        codesign --force --sign "VoiceToText Dev" "$INSTALLED_APP"
-        echo "==> Updated $INSTALLED_APP (in-place, signed with VoiceToText Dev)"
+        codesign --force --sign - "$INSTALLED_APP"
+        echo "==> Updated $INSTALLED_APP (in-place, ad-hoc signed)"
         open "$INSTALLED_APP"
         echo "==> Relaunched $APP_NAME"
     else

@@ -40,8 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Key monitoring
     private var globalFlagsMonitor: Any?
     private var localFlagsMonitor: Any?
-    private var globalKeyDownMonitor: Any?
-    private var localKeyDownMonitor: Any?
     private var lastToggleTime: TimeInterval = 0
 
     // Right Command key logic
@@ -66,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("App launched")
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+        hud.onCancel = { [weak self] in self?.cancelRecognition() }
         loadEngine()
         loadHistory()
         setupStatusItem()
@@ -244,10 +243,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fnSpaceItem.isEnabled = false
         menu.addItem(fnSpaceItem)
 
-        let escItem = NSMenuItem(title: "Esc: Cancel recognition", action: nil, keyEquivalent: "")
-        escItem.isEnabled = false
-        menu.addItem(escItem)
-
         menu.addItem(NSMenuItem.separator())
 
         // History submenu
@@ -270,7 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ("    (hold, speak, release \u{2192} auto-paste)", false),
             ("  Tap Right \u{2318} \u{2014} Hands-Free Toggle", false),
             ("    (tap to start, tap to stop \u{2192} auto-paste)", false),
-            ("  Esc \u{2014} Cancel recognition", false),
+            ("  HUD \u{2715} button \u{2014} Cancel recording/recognition", false),
             ("", false),
             ("Terminal commands:", false),
             ("  Restart: pkill VoiceToText && open -a VoiceToText", false),
@@ -302,10 +297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func removeKeyMonitors() {
-        if let m = globalFlagsMonitor   { NSEvent.removeMonitor(m); globalFlagsMonitor = nil }
-        if let m = localFlagsMonitor    { NSEvent.removeMonitor(m); localFlagsMonitor = nil }
-        if let m = globalKeyDownMonitor { NSEvent.removeMonitor(m); globalKeyDownMonitor = nil }
-        if let m = localKeyDownMonitor  { NSEvent.removeMonitor(m); localKeyDownMonitor = nil }
+        if let m = globalFlagsMonitor { NSEvent.removeMonitor(m); globalFlagsMonitor = nil }
+        if let m = localFlagsMonitor  { NSEvent.removeMonitor(m); localFlagsMonitor = nil }
     }
 
     private func setupKeyMonitors() {
@@ -320,16 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        // keyDown monitors (detect Space while Fn is held)
-        globalKeyDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleKeyDown(event, source: "global")
-        }
-        localKeyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.handleKeyDown(event, source: "local")
-            return event
-        }
-
-        Log.info("Installed key monitors (flagsChanged, keyDown)")
+        Log.info("Installed key monitors (flagsChanged)")
     }
 
     // MARK: - Key handling
@@ -387,19 +371,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             isPTTActive = false
             cmdPressTime = 0
-        }
-    }
-
-    private func handleKeyDown(_ event: NSEvent, source: String) {
-        // Escape (keyCode 53) cancels recording or processing
-        guard event.keyCode == 53 else { return }
-
-        switch state {
-        case .recording, .processing:
-            Log.info("Escape pressed (\(source)), cancelling from state=\(state)")
-            cancelRecognition()
-        case .idle:
-            break
         }
     }
 
@@ -518,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateIcon(for: .idle)
         NSSound(named: "Funk")?.play()
         hud.show("Cancelled", icon: "\u{270B}", duration: 1.5)
-        Log.info("Recognition CANCELLED by Escape")
+        Log.info("Recognition CANCELLED by HUD button")
     }
 
     private func handleTranscription(_ text: String) {
